@@ -52,3 +52,12 @@ coverage-final.json
 
 # Spring Boot Dev Tools
 .spring-boot-devtools.properties
+
+
+# Application properties (CRITICAL - DO NOT COMMIT SENSITIVE INFO)
+src/main/resources/application*.properties
+src/main/resources/application*.yml
+src/main/resources/application*.yaml
+
+# Specific file containing API key
+src/main/resources/application.properties
