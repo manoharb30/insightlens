@@ -2,19 +2,30 @@ package com.InsightLens.service;
 
 import com.InsightLens.model.Document;
 import com.InsightLens.model.DocumentSection;
+import com.InsightLens.model.processing.DocumentChunk; // Import DocumentChunk
 import com.InsightLens.repository.DocumentRepository;
 import com.InsightLens.repository.DocumentSectionRepository;
+import com.InsightLens.util.TikaTextExtractor;
+import com.InsightLens.service.processing.TextSplitterService; // Import TextSplitterService
+import com.InsightLens.service.processing.EmbeddingService; // Import EmbeddingService
+
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.tika.exception.TikaException;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
+import org.xml.sax.SAXException;
 
 import java.io.IOException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.io.InputStream; // Import InputStream
 
 @Service
 @RequiredArgsConstructor
@@ -24,10 +35,10 @@ public class DocumentService {
     private final DocumentRepository documentRepository;
     private final DocumentSectionRepository sectionRepository;
     private final StorageService storageService;
-    private final TextExtractorService textExtractor;
+    private final TikaTextExtractor tikaTextExtractor;
     private final DocumentTypeDetectorService typeDetector;
-    private final TextSplitterService splitter;
-    private final EmbeddingService embeddingService;
+    private final TextSplitterService splitter; // TextSplitterService is now injected
+    private final EmbeddingService embeddingService; // EmbeddingService is now injected
 
     /**
      * Handles document upload, saves initial document record, and triggers
@@ -37,7 +48,7 @@ public class DocumentService {
      * @return The saved Document entity with PROCESSING status.
      * @throws IOException if file storage fails.
      */
-    @Transactional // Apply transaction to the initial save
+    @Transactional
     public Document uploadDocument(MultipartFile file) throws IOException {
         log.info("Starting upload process for file: {}", file.getOriginalFilename());
 
@@ -51,21 +62,19 @@ public class DocumentService {
             .originalFilename(file.getOriginalFilename())
             .fileType(file.getContentType())
             .fileSize(file.getSize())
-            .status(Document.DocumentStatus.PROCESSING) // Set status to PROCESSING
+            .status(Document.DocumentStatus.PROCESSING)
             .uploadDate(LocalDateTime.now())
             .createdAt(LocalDateTime.now())
             .updatedAt(LocalDateTime.now())
-            // domainType will be detected asynchronously
-            // sections, summary, tags, insights populated asynchronously
+            .filePath(filePath)
             .build();
 
         document = documentRepository.save(document);
         log.info("Initial Document record saved with ID: {}", document.getId());
 
         // 3. Trigger asynchronous processing
-        processDocumentAsync(document.getId(), filePath); // Pass ID and file path
+        processDocumentAsync(document.getId());
 
-        // Return the document immediately, processing continues in the background
         return document;
     }
 
@@ -74,73 +83,105 @@ public class DocumentService {
      * This method runs in a separate thread.
      *
      * @param documentId The ID of the Document to process.
-     * @param filePath The path where the file is stored.
      */
-    @Async // Marks this method for asynchronous execution
-    @Transactional // Apply transaction to the processing logic
-    public void processDocumentAsync(Long documentId, String filePath) {
+    @Async
+    @Transactional // Ensure the entire async process runs in one transaction for batch saving
+    public void processDocumentAsync(Long documentId) {
         log.info("Starting asynchronous processing for Document ID: {}", documentId);
 
         Optional<Document> optionalDocument = documentRepository.findById(documentId);
         if (!optionalDocument.isPresent()) {
             log.error("Document with ID {} not found for async processing.", documentId);
-            return; // Cannot process if document not found
+            return;
         }
         Document document = optionalDocument.get();
 
         try {
-            // Ensure status is still PROCESSING before starting heavy tasks
             if (document.getStatus() != Document.DocumentStatus.PROCESSING) {
                  log.warn("Document ID {} is not in PROCESSING status. Skipping async processing.", documentId);
                  return;
             }
 
-            // 1. Extract text (using the stored file path)
-            // Assuming TextExtractorService has extractTextFromPath(String filePath)
-            // and it handles the file type internally or defaults to PDF for MVP
-            String fullText = textExtractor.extractTextFromPath(filePath); // Corrected method call
-            log.info("Text extracted for Document ID: {}", documentId);
+            String filePath = document.getFilePath();
+            if (filePath == null || filePath.isEmpty()) {
+                 log.error("File path not found for Document ID {}. Cannot extract text.", documentId);
+                 document.setStatus(Document.DocumentStatus.FAILED);
+                 document.setUpdatedAt(LocalDateTime.now());
+                 documentRepository.save(document);
+                 return;
+            }
 
-            // 2. Detect type (can be done here asynchronously for better accuracy on full text)
-            // Assuming DocumentTypeDetectorService has a public String detect(String text) method
-            String detectedType = typeDetector.detect(fullText); // Corrected method call
+            // 1. Extract text using TikaTextExtractor
+            String fullText = null;
+            Path fileSystemPath = Paths.get(filePath);
+            try (InputStream inputStream = java.nio.file.Files.newInputStream(fileSystemPath)) {
+                fullText = tikaTextExtractor.extractText(inputStream);
+            }
+
+            if (fullText == null || fullText.trim().isEmpty()) {
+                 log.warn("Extracted text is empty for Document ID {}.", documentId);
+                 // Decide how to handle empty text - maybe mark as processed but with a warning?
+                 // For now, let's proceed, subsequent steps might handle empty input.
+                 document.setStatus(Document.DocumentStatus.PROCESSED); // Mark as processed if empty
+                 document.setProcessedAt(LocalDateTime.now());
+                 document.setUpdatedAt(LocalDateTime.now());
+                 documentRepository.save(document);
+                 log.info("Finished asynchronous processing for Document ID: {}. Status: PROCESSED (Empty Content)", documentId);
+                 return; // Exit if no text to process further
+            } else {
+                 log.info("Text extracted for Document ID: {}. Snippet: {}", documentId, fullText.substring(0, Math.min(fullText.length(), 500)) + (fullText.length() > 500 ? "..." : ""));
+            }
+
+            // 2. Detect type
+            String detectedType = typeDetector.detect(fullText);
             document.setDomainType(detectedType);
             log.info("Domain detected for Document ID {}: {}", documentId, detectedType);
 
+            // 3. Split text into sections and capture metadata (Task 2.4)
+            // ✅ Now calling the split method that returns List<DocumentChunk>
+            List<DocumentChunk> documentChunks = splitter.split(fullText);
+            log.info("Split Document ID {} into {} chunks.", documentId, documentChunks.size());
 
-            // 3. Split text into sections
-            // Assuming TextSplitterService has public List<String> split(String text) method
-            List<String> sectionsText = splitter.split(fullText); // Corrected method call
-            log.info("Split Document ID {} into {} sections.", documentId, sectionsText.size());
-
-            // 4. Generate embedding for each section and save DocumentSection entities
-            // This loop should be optimized, potentially batching embedding calls
-            for (int i = 0; i < sectionsText.size(); i++) {
-                String sectionText = sectionsText.get(i);
+            // 4. Generate embedding for each chunk and prepare for batch saving
+            List<DocumentSection> sectionsToSave = new ArrayList<>();
+            // ✅ Iterate through DocumentChunk objects
+            for (DocumentChunk chunk : documentChunks) {
+                String sectionText = chunk.getText(); // Get text from the chunk object
+                if (sectionText == null || sectionText.trim().isEmpty()) {
+                    log.debug("Skipping empty chunk (Order {}) for Document ID {}", chunk.getOriginalOrder(), documentId);
+                    continue; // Skip empty chunks
+                }
                 try {
                     // Call the embedding service to get the vector for the section text
-                    // ✅ Corrected method name from getEmbedding to generateEmbedding
-                    // ✅ generateEmbedding now returns float[]
-                    float[] embedding = embeddingService.generateEmbedding(sectionText); // Corrected method call
+                    float[] embedding = embeddingService.generateEmbedding(sectionText);
 
-                    // ✅ Corrected builder method name from sectionOrder to sectionOrder
-                    // Assuming DocumentSection model has a field named 'sectionOrder'
+                    // ✅ Build DocumentSection using metadata from DocumentChunk
                     DocumentSection section = DocumentSection.builder()
                         .text(sectionText)
-                        .embedding(embedding) // embedding is float[]
+                        .embedding(embedding)
                         .document(document) // Link to the parent document
-                        .sectionOrder(i) // Corrected builder method name
+                        .originalOrder(chunk.getOriginalOrder()) // Populate originalOrder
+                        .startIndex(chunk.getStartIndex()) // Populate startIndex
+                        .endIndex(chunk.getEndIndex()) // Populate endIndex
+                        .sectionTitle(chunk.getSectionTitle()) // Populate sectionTitle (can be null)
                         .build();
-                    // Consider batch saving sections for performance
-                    sectionRepository.save(section);
-                    log.debug("Saved section {} for Document ID {}", i, documentId);
+                    sectionsToSave.add(section); // Add section to the list
+                    log.debug("Prepared section (Order {}) for batch saving for Document ID {}", chunk.getOriginalOrder(), documentId);
                 } catch (Exception e) {
-                    log.error("Failed to generate/save embedding for section {} of Document ID {}: {}", i, documentId, e.getMessage());
-                    // Decide how to handle section-level errors (skip section? fail document?)
-                    // For MVP, maybe log and continue, or mark document as partially processed
+                    log.error("Failed to generate embedding for chunk (Order {}) of Document ID {}: {}", chunk.getOriginalOrder(), documentId, e.getMessage());
+                    // Decide how to handle section-level errors
+                    // For MVP, log and continue might be acceptable.
                 }
             }
-            log.info("Processed and saved sections/embeddings for Document ID: {}", documentId);
+            log.info("Generated embeddings and prepared {} sections for batch saving for Document ID: {}", sectionsToSave.size(), documentId);
+
+            // Implement Batch Saving for Sections
+            if (!sectionsToSave.isEmpty()) {
+                 sectionRepository.saveAll(sectionsToSave); // Save all collected sections in a batch
+                 log.info("Batch saved {} sections for Document ID: {}", sectionsToSave.size(), documentId);
+            } else {
+                 log.warn("No sections to save for Document ID {}.", documentId);
+            }
 
 
             // 5. Perform other async tasks if needed (e.g., initial summary, insights)
@@ -152,23 +193,47 @@ public class DocumentService {
             document.setStatus(Document.DocumentStatus.PROCESSED);
             document.setProcessedAt(LocalDateTime.now());
             document.setUpdatedAt(LocalDateTime.now());
-            documentRepository.save(document); // Save final status and async-populated fields
+            documentRepository.save(document);
             log.info("Finished asynchronous processing for Document ID: {}. Status: PROCESSED", documentId);
 
-        } catch (Exception e) {
-            // Handle any exception during processing
-            log.error("Asynchronous processing failed for Document ID {}: {}", documentId, e.getMessage(), e);
-
-            // Update document status to FAILED
+        } catch (IOException e) {
+            log.error("I/O error accessing file for Document ID {}: {}", documentId, e.getMessage(), e);
             document.setStatus(Document.DocumentStatus.FAILED);
             document.setUpdatedAt(LocalDateTime.now());
-            documentRepository.save(document); // Save FAILED status
-            log.info("Marked Document ID {} as FAILED.", documentId);
+            documentRepository.save(document);
+        } catch (TikaException e) {
+            log.error("Tika error during text extraction for Document ID {}: {}", documentId, e.getMessage(), e);
+            document.setStatus(Document.DocumentStatus.FAILED);
+            document.setUpdatedAt(LocalDateTime.now());
+            documentRepository.save(document);
+        } catch (SAXException e) {
+            log.error("SAX error during text extraction for Document ID {}: {}", documentId, e.getMessage(), e);
+            document.setStatus(Document.DocumentStatus.FAILED);
+            document.setUpdatedAt(LocalDateTime.now());
+            documentRepository.save(document);
+        } catch (Exception e) {
+             // Catch any other unexpected exceptions during the async process
+            log.error("An unexpected error occurred during async processing for Document ID {}: {}", documentId, e.getMessage(), e);
+            document.setStatus(Document.DocumentStatus.FAILED);
+            document.setUpdatedAt(LocalDateTime.now());
+            documentRepository.save(document);
         }
     }
 
-    // Note: This service assumes the existence of other services like:
-    // StorageService, TextExtractorService, DocumentTypeDetectorService,
-    // TextSplitterService, and EmbeddingService, as well as DocumentRepository
-    // and DocumentSectionRepository with correct methods and builder setup.
+    /**
+     * Retrieves a Document by its ID.
+     * @param id The ID of the document.
+     * @return An Optional containing the Document if found.
+     */
+    public Optional<Document> getDocumentById(Long id) {
+        return documentRepository.findById(id);
+    }
+
+    /**
+     * Retrieves all Documents.
+     * @return A list of all Documents.
+     */
+    public List<Document> getAllDocuments() {
+        return documentRepository.findAll();
+    }
 }

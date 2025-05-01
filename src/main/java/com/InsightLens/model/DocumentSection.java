@@ -1,44 +1,51 @@
-package com.InsightLens.model;
+package com.InsightLens.model; // Adjust package as necessary
 
 import jakarta.persistence.*;
-import lombok.*;
-import org.hibernate.annotations.JdbcTypeCode; // Needed for JSON/Vector types if using Hibernate
-import org.hibernate.type.SqlTypes; // Needed for JSON/Vector types if using Hibernate
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
 
-@Entity
-@Table(name = "document_sections", indexes = {
-     @Index(name = "idx_section_document", columnList = "document_id") // Index on FK
-})
-@Data
-@Builder // Generates the builder, including sectionOrder()
-@NoArgsConstructor
-@AllArgsConstructor
+import java.time.LocalDateTime;
+import java.util.List;
+
+@Entity // Marks this class as a JPA entity
+@Data // Lombok annotation to generate getters, setters, toString, equals, and hashCode
+@NoArgsConstructor // Lombok annotation to generate a no-argument constructor
+@AllArgsConstructor // Lombok annotation to generate an all-argument constructor
+@Builder // Lombok annotation to generate a builder pattern
 public class DocumentSection {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @GeneratedValue(strategy = GenerationType.IDENTITY) // Auto-generate ID
     private Long id;
 
-    @ManyToOne(fetch = FetchType.LAZY) // Lazy fetch for document
-    @JoinColumn(name = "document_id") // Define FK column name
-    private Document document; // Link back to the Document
+    @ManyToOne(fetch = FetchType.LAZY) // Many sections belong to One document
+    @JoinColumn(name = "document_id", nullable = false) // Foreign key column
+    private Document document; // Link back to the parent document
 
-    @Lob // Use Lob for potentially large text
-    @Column(columnDefinition = "TEXT") // Store as TEXT in DB
-    private String text;
+    @Column(columnDefinition = "TEXT") // Use TEXT type for potentially large section text
+    private String text; // The text content of the section/chunk
 
-    // ✅ Add the missing sectionOrder field
-    private int sectionOrder; // To maintain original document order
+    // Add the new metadata fields captured during chunking (Task 2.4)
+    private int originalOrder; // The original order of this section within the document
+    private int startIndex; // The starting character index in the original raw text
+    private int endIndex; // The ending character index (exclusive) in the original raw text
 
-    // PGVector embedding - columnDefinition specifies the type and dimension
-    // Dimension 384 is common for models like bge-small
-    @Column(name = "embedding", columnDefinition = "vector(384)")
-    private float[] embedding; // Use float[] for vector type
+    @Column(columnDefinition = "VARCHAR(500)") // Adjust size as needed for section titles
+    private String sectionTitle; // The detected heading/section title (can be null)
 
-    // Optional: Start and end character indices for the section in the original text
-    // private int startChar;
-    // private int endChar;
+    // Use columnDefinition = "VECTOR(384)" if your database supports pgvector or similar
+    // Otherwise, store as byte[] or another suitable type depending on your DB and JPA provider
+    @Column(columnDefinition = "VECTOR(384)") // Example for pgvector
+    private float[] embedding; // The vector embedding for this section's text
 
-    // Optional: Section type (e.g., "heading", "paragraph", "list_item")
-    // private String sectionType;
+    // Consider adding fields for AI insights specific to this section later
+
+    private LocalDateTime createdAt; // Timestamp of entity creation
+    private LocalDateTime updatedAt; // Timestamp of last update
+
+    // Note: Add or adjust columnDefinition based on your specific database and its vector type support.
+    // If not using a vector type directly, you might need to handle serialization/deserialization of float[]
+    // or store as a BLOB/BYTEA and manage it manually or with a custom type.
 }

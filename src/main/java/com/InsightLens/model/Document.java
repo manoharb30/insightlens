@@ -27,6 +27,7 @@ public class Document {
     private String originalFilename;
     private String fileType; // pdf/docx/txt
     private Long fileSize; // bytes
+    private String filePath;
 
     @Enumerated(EnumType.STRING)
     private DocumentStatus status;
