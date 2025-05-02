@@ -60,3 +60,4 @@ src/main/resources/application*.yaml
 
 # Specific file containing API key
 src/main/resources/application.properties
+docker-compose.yml
