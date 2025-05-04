@@ -46,6 +46,7 @@ Desktop.ini
 
 # Test coverage tools
 coverage/
+uploads/
 .nyc_output/
 coverage-final.json
 .clover/
