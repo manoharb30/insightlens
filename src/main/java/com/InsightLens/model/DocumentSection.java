@@ -7,45 +7,56 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
-import java.util.List;
+// Removed import java.util.List; as it's not used directly here
 
 @Entity // Marks this class as a JPA entity
-@Data // Lombok annotation to generate getters, setters, toString, equals, and hashCode
-@NoArgsConstructor // Lombok annotation to generate a no-argument constructor
-@AllArgsConstructor // Lombok annotation to generate an all-argument constructor
-@Builder // Lombok annotation to generate a builder pattern
+@Table(name = "document_section") // Explicit table name often good practice
+@Data // Lombok annotation
+@NoArgsConstructor // Lombok annotation
+@AllArgsConstructor // Lombok annotation
+@Builder // Lombok annotation
 public class DocumentSection {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY) // Auto-generate ID
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @ManyToOne(fetch = FetchType.LAZY) // Many sections belong to One document
-    @JoinColumn(name = "document_id", nullable = false) // Foreign key column
-    private Document document; // Link back to the parent document
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "document_id", nullable = false)
+    private Document document;
 
-    @Column(columnDefinition = "TEXT") // Use TEXT type for potentially large section text
-    private String text; // The text content of the section/chunk
+    @Column(columnDefinition = "TEXT")
+    private String text;
 
-    // Add the new metadata fields captured during chunking (Task 2.4)
-    private int originalOrder; // The original order of this section within the document
-    private int startIndex; // The starting character index in the original raw text
-    private int endIndex; // The ending character index (exclusive) in the original raw text
+    private int originalOrder;
+    private int startIndex;
+    private int endIndex;
 
-    @Column(columnDefinition = "VARCHAR(500)") // Adjust size as needed for section titles
-    private String sectionTitle; // The detected heading/section title (can be null)
+    @Column(columnDefinition = "VARCHAR(500)")
+    private String sectionTitle;
 
-    // Use columnDefinition = "VECTOR(384)" if your database supports pgvector or similar
-    // Otherwise, store as byte[] or another suitable type depending on your DB and JPA provider
-    @Column(columnDefinition = "VECTOR(384)") // Example for pgvector
-    private float[] embedding; // The vector embedding for this section's text
+    // Keep the column definition for schema generation by Hibernate
+    @Column(columnDefinition = "VECTOR(1536)", nullable = true) // Ensure dimension is correct (1536 for text-embedding-3-small)
+    // Mark as Transient so Hibernate doesn't try to load/map it directly
+    @Transient
+    private float[] embedding;
 
-    // Consider adding fields for AI insights specific to this section later
+    private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
 
-    private LocalDateTime createdAt; // Timestamp of entity creation
-    private LocalDateTime updatedAt; // Timestamp of last update
+    // Add PrePersist and PreUpdate methods to set timestamps automatically
+    @PrePersist
+    protected void onCreate() {
+        createdAt = LocalDateTime.now();
+        updatedAt = LocalDateTime.now();
+    }
 
-    // Note: Add or adjust columnDefinition based on your specific database and its vector type support.
-    // If not using a vector type directly, you might need to handle serialization/deserialization of float[]
-    // or store as a BLOB/BYTEA and manage it manually or with a custom type.
+    @PreUpdate
+    protected void onUpdate() {
+        updatedAt = LocalDateTime.now();
+    }
+
+    // NOTE: Because 'embedding' is @Transient, Hibernate will NOT automatically
+    // persist the float[] array when using standard repository.save().
+    // The saving logic in DocumentService might need adjustment later.
 }

@@ -19,142 +19,171 @@ import java.util.regex.Pattern;
 public class TextSplitterService {
 
     // --- Configuration for Chunking Strategy ---
-    // Regex to identify common headings/sections in Legal, Finance, Pharma documents.
-    // This is an initial set and will need refinement based on backtesting (Task 2.1 refinement).
-    // It also captures the heading text itself in a group.
     private static final String HEADING_REGEX =
             "(?m)^\\s*(ARTICLE\\s+[IVXLCDM]+\\.?|ARTICLE\\s+\\d+\\.?|SECTION\\s+\\d+(\\.\\d+)*\\.?|CHAPTER\\s+\\d+\\.?|[IVXLCDM]+\\.\\s+|\\d+\\.\\s*|[A-Za-z]\\.\\s*|Executive Summary|Introduction|Background|Findings|Conclusion)\\s*.*$";
     private static final Pattern HEADING_PATTERN = Pattern.compile(HEADING_REGEX);
-
-    // Maximum size for a chunk after initial splitting.
-    // If a chunk is larger than this, the fallback splitting will be applied.
-    private static final int MAX_CHUNK_SIZE_CHARS = 2000; // Example: ~300-400 words
+    private static final int MAX_CHUNK_SIZE_CHARS = 2000;
 
     // --- Implementation ---
 
-    /**
-     * Splits the full text of a document into logical chunks, capturing metadata.
-     * Implements a heading/section-based strategy with a fallback.
-     *
-     * @param fullText The raw text extracted from the document.
-     * @return A list of DocumentChunk objects.
-     */
     public List<DocumentChunk> split(String fullText) {
-        List<DocumentChunk> chunks = new ArrayList<>();
+        log.debug("Starting text splitting process..."); // Log start
+        List<DocumentChunk> initialChunks = new ArrayList<>();
         if (fullText == null || fullText.trim().isEmpty()) {
-            log.warn("Attempted to split empty or null text.");
-            return chunks; // Return empty list for empty input
+            log.warn("Attempted to split empty or null text. Returning empty list.");
+            return initialChunks;
         }
 
-        // Normalize line endings to simplify regex and index tracking
         fullText = fullText.replace("\r\n", "\n").replace("\r", "\n");
+        log.trace("Normalized line endings. Full text length: {}", fullText.length()); // Use TRACE for very verbose info
 
         Matcher matcher = HEADING_PATTERN.matcher(fullText);
-        int currentStartIndex = 0; // Track the start index of the current chunk
-        int chunkOrder = 0; // Track the order of the chunks
+        int currentStartIndex = 0;
+        int chunkOrder = 0;
 
+        log.debug("Starting initial split based on headings...");
         // 1. Split based on detected headings
         while (matcher.find()) {
             int headingStartIndex = matcher.start();
-            int headingEndIndex = matcher.end();
-            String headingText = matcher.group(0).trim(); // Capture the full heading text
+            String headingText = matcher.group(0).trim(); // Get heading text early for logging
+            log.debug("Found potential heading at index {}: '{}'", headingStartIndex, headingText);
 
-            // Add the text from the last boundary up to the start of the current heading
             String chunkText = fullText.substring(currentStartIndex, headingStartIndex).trim();
             if (!chunkText.isEmpty()) {
-                chunks.add(DocumentChunk.builder()
+                log.debug("Adding initial chunk (Order {}) from index {} to {}. Title: null", chunkOrder, currentStartIndex, headingStartIndex);
+                initialChunks.add(DocumentChunk.builder()
                         .text(chunkText)
                         .originalOrder(chunkOrder++)
                         .startIndex(currentStartIndex)
-                        .endIndex(headingStartIndex) // End before the heading starts
-                        .sectionTitle(null) // This chunk is the content *before* the heading
+                        .endIndex(headingStartIndex)
+                        .sectionTitle(null)
                         .build());
+            } else {
+                 log.debug("Skipping empty chunk between index {} and {}", currentStartIndex, headingStartIndex);
             }
-
-            // The heading itself can be considered part of the next chunk's context,
-            // or added as a separate small chunk. For this strategy, we'll include
-            // the heading text at the start of the chunk it introduces.
-            // The start index for the next chunk begins at the start of the heading.
-            currentStartIndex = headingStartIndex;
+            currentStartIndex = headingStartIndex; // Move start index to the beginning of the heading
         }
+        log.debug("Finished initial split based on headings. Current start index: {}", currentStartIndex);
 
-        // Add the last chunk (from the last heading/boundary to the end of the document)
+        // Add the last chunk
         String lastChunkText = fullText.substring(currentStartIndex).trim();
         if (!lastChunkText.isEmpty()) {
-             // Need to re-match the heading for the last chunk if it started with one
              String sectionTitleForLastChunk = null;
              Matcher lastChunkMatcher = HEADING_PATTERN.matcher(lastChunkText);
              if (lastChunkMatcher.find() && lastChunkMatcher.start() == 0) {
                  sectionTitleForLastChunk = lastChunkMatcher.group(0).trim();
+                 log.debug("Identified title for last chunk: '{}'", sectionTitleForLastChunk);
              }
-
-            chunks.add(DocumentChunk.builder()
+             log.debug("Adding final initial chunk (Order {}) from index {} to {}. Title: '{}'", chunkOrder, currentStartIndex, fullText.length(), sectionTitleForLastChunk);
+            initialChunks.add(DocumentChunk.builder()
                     .text(lastChunkText)
                     .originalOrder(chunkOrder++)
                     .startIndex(currentStartIndex)
-                    .endIndex(fullText.length()) // End at the end of the original text
-                    .sectionTitle(sectionTitleForLastChunk) // Associate the heading if it exists at the start
+                    .endIndex(fullText.length())
+                    .sectionTitle(sectionTitleForLastChunk)
                     .build());
+        } else {
+             log.debug("Skipping empty last chunk from index {}.", currentStartIndex);
         }
+        log.info("Generated {} initial chunks based on headings.", initialChunks.size());
 
-        // 2. Apply fallback splitting to large chunks and rebuild the list with potential new chunks
+
+        // 2. Apply fallback splitting to large chunks
+        log.debug("Applying fallback splitting for chunks larger than {} chars...", MAX_CHUNK_SIZE_CHARS);
         List<DocumentChunk> finalChunks = new ArrayList<>();
-        int finalChunkOrder = 0; // New order for the final list of chunks
+        int finalChunkOrder = 0;
 
-        for (DocumentChunk chunk : chunks) {
+        for (DocumentChunk chunk : initialChunks) {
+             log.trace("Processing initial chunk order: {}", chunk.getOriginalOrder()); // Use TRACE
             if (chunk.getText().length() > MAX_CHUNK_SIZE_CHARS) {
-                log.debug("Chunk {} (Order {}) is large ({} chars), applying fallback splitting.",
-                        chunk.getSectionTitle() != null ? chunk.getSectionTitle() : "No Title",
-                        chunk.getOriginalOrder(),
-                        chunk.getText().length());
+                log.debug("Chunk (Initial Order {}) is large ({} chars), applying fallback splitting by paragraph.",
+                        chunk.getOriginalOrder(), chunk.getText().length());
 
-                // Fallback: Split large chunks by paragraphs (double newlines)
-                // Need to track indices relative to the original chunk's start index
                 String[] paragraphs = chunk.getText().split("\\n\\n+");
-                int currentRelativeIndex = 0; // Index within the current large chunk text
+                int currentRelativeIndex = 0; // Tracks position within the current large chunk's text
+                log.debug("Split large chunk into {} potential paragraphs.", paragraphs.length);
 
-                for (String paragraph : paragraphs) {
+                for (int i = 0; i < paragraphs.length; i++) { // Loop with index for logging
+                    String paragraph = paragraphs[i];
                     String trimmedParagraph = paragraph.trim();
-                    if (!trimmedParagraph.isEmpty()) {
-                        int paragraphStartIndex = chunk.getStartIndex() + chunk.getText().indexOf(paragraph, currentRelativeIndex);
-                        int paragraphEndIndex = paragraphStartIndex + paragraph.length();
+                    int paragraphStartIndexInChunk = -1; // Initialize before the block
 
-                        // Further fallback: If paragraph is still too large, split by sentences (basic)
+                    if (!trimmedParagraph.isEmpty()) {
+                        // Find the start index of this paragraph within the original chunk's text
+                        paragraphStartIndexInChunk = chunk.getText().indexOf(paragraph, currentRelativeIndex);
+                        if (paragraphStartIndexInChunk == -1) {
+                             log.warn("Could not reliably find start index for paragraph {} in chunk {}. Skipping.", i, chunk.getOriginalOrder());
+                             // Update relative index cautiously to avoid infinite loops if indexOf fails repeatedly
+                             currentRelativeIndex += paragraph.length();
+                             continue; // Skip if index finding fails
+                        }
+                        int paragraphStartIndex = chunk.getStartIndex() + paragraphStartIndexInChunk;
+                        int paragraphEndIndex = paragraphStartIndex + paragraph.length(); // Use original paragraph length for index
+
+                        log.trace("Processing paragraph {} (StartIdx: {}, EndIdx: {})", i, paragraphStartIndex, paragraphEndIndex);
+
                         if (trimmedParagraph.length() > MAX_CHUNK_SIZE_CHARS) {
-                            // This sentence splitting regex is basic and needs refinement for real NLP
-                            String[] sentences = trimmedParagraph.split("(?<=[.!?])\\s+");
-                            int currentSentenceRelativeIndex = 0;
-                             for (String sentence : sentences) {
+                            log.debug("Paragraph {} within chunk {} is still too large ({} chars), splitting by sentence.", i, chunk.getOriginalOrder(), trimmedParagraph.length());
+                            String[] sentences = trimmedParagraph.split("(?<=[.!?])\\s+"); // Basic sentence split
+                            int currentSentenceRelativeIndex = 0; // Tracks position within the current paragraph's text
+                             log.debug("Split paragraph into {} potential sentences.", sentences.length);
+
+                             for (int j = 0; j < sentences.length; j++) { // Loop with index for logging
+                                 String sentence = sentences[j];
                                  String trimmedSentence = sentence.trim();
                                  if (!trimmedSentence.isEmpty()) {
-                                     int sentenceStartIndex = paragraphStartIndex + trimmedParagraph.indexOf(sentence, currentSentenceRelativeIndex);
-                                     int sentenceEndIndex = sentenceStartIndex + sentence.length();
+                                     // Find start index of sentence within the paragraph
+                                     int sentenceStartIndexInPara = trimmedParagraph.indexOf(sentence, currentSentenceRelativeIndex);
+                                     if (sentenceStartIndexInPara == -1) {
+                                         log.warn("Could not reliably find start index for sentence {} in paragraph {}. Skipping.", j, i);
+                                         currentSentenceRelativeIndex += sentence.length(); // Update cautiously
+                                         continue; // Skip if index finding fails
+                                     }
+                                     int sentenceStartIndex = paragraphStartIndex + sentenceStartIndexInPara;
+                                     int sentenceEndIndex = sentenceStartIndex + sentence.length(); // Use original sentence length
 
+                                     log.trace("Adding sentence chunk (Final Order {}): StartIdx={}, EndIdx={}", finalChunkOrder, sentenceStartIndex, sentenceEndIndex);
                                      finalChunks.add(DocumentChunk.builder()
                                              .text(trimmedSentence)
-                                             .originalOrder(finalChunkOrder++) // Assign new order
-                                             .startIndex(sentenceStartIndex) // Use calculated start index
-                                             .endIndex(sentenceEndIndex) // Use calculated end index
+                                             .originalOrder(finalChunkOrder++)
+                                             .startIndex(sentenceStartIndex)
+                                             .endIndex(sentenceEndIndex)
                                              .sectionTitle(chunk.getSectionTitle()) // Inherit parent section title
                                              .build());
-                                     currentSentenceRelativeIndex = trimmedParagraph.indexOf(sentence, currentSentenceRelativeIndex) + sentence.length();
+                                     // Update relative index within the paragraph
+                                     currentSentenceRelativeIndex = sentenceStartIndexInPara + sentence.length();
+                                 } else {
+                                      log.trace("Skipping empty sentence chunk (Index {}).", j);
                                  }
                              }
                         } else {
+                           // Paragraph is within size limit
+                            log.trace("Adding paragraph chunk (Final Order {}): StartIdx={}, EndIdx={}", finalChunkOrder, paragraphStartIndex, paragraphEndIndex);
                            finalChunks.add(DocumentChunk.builder()
                                    .text(trimmedParagraph)
-                                   .originalOrder(finalChunkOrder++) // Assign new order
-                                   .startIndex(paragraphStartIndex) // Use calculated start index
-                                   .endIndex(paragraphEndIndex) // Use calculated end index
+                                   .originalOrder(finalChunkOrder++)
+                                   .startIndex(paragraphStartIndex)
+                                   .endIndex(paragraphEndIndex)
                                    .sectionTitle(chunk.getSectionTitle()) // Inherit parent section title
                                    .build());
                         }
+                    } else {
+                         log.trace("Skipping empty paragraph chunk (Index {}).", i);
                     }
-                    currentRelativeIndex = chunk.getText().indexOf(paragraph, currentRelativeIndex) + paragraph.length();
-                }
-                log.debug("Split a large chunk into {} smaller chunks.", paragraphs.length);
+
+                    // Update relative index within the original large chunk's text
+                    // Ensure paragraphStartIndexInChunk was found before using it
+                    if (paragraphStartIndexInChunk != -1) {
+                         currentRelativeIndex = paragraphStartIndexInChunk + paragraph.length();
+                    } else {
+                         // If index wasn't found, advance cautiously based on paragraph length
+                         // This might drift if indexOf keeps failing, but prevents getting stuck
+                         currentRelativeIndex += paragraph.length();
+                    }
+                } // End of paragraph loop
             } else {
                 // Chunk is within size limit, add it directly with updated order
+                 log.trace("Adding original chunk (Initial Order {}) as final chunk (Final Order {}). Size: {}", chunk.getOriginalOrder(), finalChunkOrder, chunk.getText().length());
                 finalChunks.add(DocumentChunk.builder()
                         .text(chunk.getText())
                         .originalOrder(finalChunkOrder++) // Assign new order
@@ -163,16 +192,43 @@ public class TextSplitterService {
                         .sectionTitle(chunk.getSectionTitle())
                         .build());
             }
+        } // End of initialChunks loop
+
+        // 3. Final Clean up (remove any empty strings)
+        int countBeforeCleanup = finalChunks.size();
+        finalChunks.removeIf(c -> c.getText() == null || c.getText().trim().isEmpty());
+        int countAfterCleanup = finalChunks.size();
+        if (countBeforeCleanup != countAfterCleanup) {
+            log.debug("Removed {} empty chunks during final cleanup.", countBeforeCleanup - countAfterCleanup);
         }
 
-        // 3. Final Clean up (remove any empty strings that might have resulted from splitting/trimming)
-        finalChunks.removeIf(c -> c.getText().isEmpty());
+
+        // --- >>> EXISTING FINAL LOGGING <<< ---
+        if (log.isDebugEnabled()) {
+            log.debug("--- Final Document Chunks Generated (Count: {}) ---", finalChunks.size());
+            for (DocumentChunk finalChunk : finalChunks) {
+                log.debug("Chunk Order: {}, Title: '{}', StartIdx: {}, EndIdx: {}, Text Snippet: '{}...'",
+                        finalChunk.getOriginalOrder(),
+                        finalChunk.getSectionTitle() != null ? finalChunk.getSectionTitle() : "N/A",
+                        finalChunk.getStartIndex(),
+                        finalChunk.getEndIndex(),
+                        truncateTextForLog(finalChunk.getText(), 100)
+                );
+            }
+            log.debug("--- End of Final Document Chunks ---");
+        }
+        // --- >>> END OF EXISTING FINAL LOGGING <<< ---
 
         log.info("Split text into {} final chunks.", finalChunks.size());
         return finalChunks;
     }
 
-    // TODO: Refine HEADING_REGEX based on backtesting results (Task 2.1 refinement)
-    // The current regex is a starting point and will likely need adjustments
-    // to accurately capture headings in your specific sample documents.
+    // Helper method for truncating log output
+    private String truncateTextForLog(String text, int maxLength) {
+        if (text == null) return "";
+        if (text.length() <= maxLength) return text;
+        return text.substring(0, maxLength).replace("\n", " "); // Replace newlines for cleaner log output
+    }
+
+    // TODO: Refine HEADING_REGEX based on backtesting results.
 }
