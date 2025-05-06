@@ -236,4 +236,9 @@ public class DocumentService {
     public List<Document> getAllDocuments() {
         return documentRepository.findAll();
     }
+
+    public List<Document> getDocumentsByStatus(String status) {
+        log.info("Fetching documents with status: {}", status);
+        return documentRepository.findByStatus(Document.DocumentStatus.valueOf(status));
+    }
 }

@@ -6,8 +6,11 @@ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer; // For disable()
 import org.springframework.security.web.SecurityFilterChain;
-// No AntPathRequestMatcher needed for global disable
-// import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+
+import java.util.Arrays;
 
 import static org.springframework.security.config.Customizer.withDefaults;
 
@@ -25,9 +28,10 @@ public class DevelopmentSecurityConfig {
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
-            // Permit all requests without authentication FOR DEVELOPMENT ONLY
+            .cors(withDefaults()) // Enable CORS
             .authorizeHttpRequests(authz -> authz
-                .requestMatchers("/**").permitAll() // Allow access to ALL paths
+                .requestMatchers("/graphql", "/graphiql", "/graphql/**").permitAll()
+                .requestMatchers("/**").permitAll()
             )
             // Revert to globally disabling CSRF protection for development simplicity
             .csrf(AbstractHttpConfigurer::disable) // Global disable
@@ -36,5 +40,18 @@ public class DevelopmentSecurityConfig {
             .httpBasic(withDefaults());
 
         return http.build();
+    }
+
+    @Bean
+    public CorsConfigurationSource corsConfigurationSource() {
+        CorsConfiguration configuration = new CorsConfiguration();
+        configuration.setAllowedOrigins(Arrays.asList("http://localhost:5173")); // Your frontend URL
+        configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS"));
+        configuration.setAllowedHeaders(Arrays.asList("*"));
+        configuration.setAllowCredentials(true);
+        
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/**", configuration);
+        return source;
     }
 }

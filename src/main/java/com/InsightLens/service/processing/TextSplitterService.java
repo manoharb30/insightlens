@@ -3,6 +3,7 @@ package com.InsightLens.service.processing; // Recommended package, adjust if ne
 import com.InsightLens.model.processing.DocumentChunk; // Import the new DocumentChunk class
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -18,6 +19,29 @@ import java.util.regex.Pattern;
 @Slf4j // Lombok annotation for logging
 public class TextSplitterService {
 
+    // Dynamic chunk sizes based on content type
+    private static final int LEGAL_CHUNK_SIZE = 800;    // Smaller for precise legal analysis
+    private static final int FINANCIAL_CHUNK_SIZE = 1200; // Larger for financial context
+    private static final int MEDICAL_CHUNK_SIZE = 1000;  // Standard for medical reports
+    private static final int DEFAULT_CHUNK_SIZE = 1000;
+    private static final int DEFAULT_CHUNK_OVERLAP = 200;
+
+    // Enhanced patterns for better section detection
+    private static final Pattern LEGAL_SECTION_PATTERN = Pattern.compile(
+        "(?m)^(?:[0-9]+\\.|[A-Z]+\\.|§|Article|Section|Clause|WHEREAS|NOW, THEREFORE|IN WITNESS WHEREOF)\\s+.*$"
+    );
+    
+    private static final Pattern FINANCIAL_SECTION_PATTERN = Pattern.compile(
+        "(?m)^(?:Financial Highlights|Revenue|Expenses|Net Income|Balance Sheet|Cash Flow|Notes to Financial Statements)\\s*.*$"
+    );
+    
+    private static final Pattern MEDICAL_SECTION_PATTERN = Pattern.compile(
+        "(?m)^(?:History of Present Illness|Past Medical History|Family History|Social History|Review of Systems|Physical Examination|Assessment|Plan)\\s*.*$"
+    );
+
+    private static final Pattern PARAGRAPH_PATTERN = Pattern.compile("\\n\\s*\\n");
+    private static final Pattern SENTENCE_PATTERN = Pattern.compile("(?<=[.!?])\\s+");
+
     // --- Configuration for Chunking Strategy ---
     private static final String HEADING_REGEX =
             "(?m)^\\s*(ARTICLE\\s+[IVXLCDM]+\\.?|ARTICLE\\s+\\d+\\.?|SECTION\\s+\\d+(\\.\\d+)*\\.?|CHAPTER\\s+\\d+\\.?|[IVXLCDM]+\\.\\s+|\\d+\\.\\s*|[A-Za-z]\\.\\s*|Executive Summary|Introduction|Background|Findings|Conclusion)\\s*.*$";
@@ -26,201 +50,297 @@ public class TextSplitterService {
 
     // --- Implementation ---
 
-    public List<DocumentChunk> split(String fullText) {
-        log.debug("Starting text splitting process..."); // Log start
-        List<DocumentChunk> initialChunks = new ArrayList<>();
-        if (fullText == null || fullText.trim().isEmpty()) {
-            log.warn("Attempted to split empty or null text. Returning empty list.");
-            return initialChunks;
+    /**
+     * Splits text into chunks based on document type and content structure
+     */
+    public List<TextChunk> splitText(String text, String documentType) {
+        log.debug("Starting text splitting for document type: {}", documentType);
+        
+        if (!StringUtils.hasText(text)) {
+            log.warn("Empty text provided for splitting");
+            return new ArrayList<>();
         }
 
-        fullText = fullText.replace("\r\n", "\n").replace("\r", "\n");
-        log.trace("Normalized line endings. Full text length: {}", fullText.length()); // Use TRACE for very verbose info
+        List<TextChunk> chunks;
+        switch (documentType.toLowerCase()) {
+            case "legal":
+                chunks = splitLegalDocument(text);
+                break;
+            case "financial":
+                chunks = splitFinancialDocument(text);
+                break;
+            case "medical":
+                chunks = splitMedicalDocument(text);
+                break;
+            default:
+                chunks = splitGenericDocument(text);
+        }
 
-        Matcher matcher = HEADING_PATTERN.matcher(fullText);
-        int currentStartIndex = 0;
-        int chunkOrder = 0;
+        log.debug("Split text into {} chunks", chunks.size());
+        return chunks;
+    }
 
-        log.debug("Starting initial split based on headings...");
-        // 1. Split based on detected headings
-        while (matcher.find()) {
-            int headingStartIndex = matcher.start();
-            String headingText = matcher.group(0).trim(); // Get heading text early for logging
-            log.debug("Found potential heading at index {}: '{}'", headingStartIndex, headingText);
+    /**
+     * Enhanced legal document splitting with semantic awareness
+     */
+    private List<TextChunk> splitLegalDocument(String text) {
+        List<TextChunk> chunks = new ArrayList<>();
+        String[] sections = LEGAL_SECTION_PATTERN.split(text);
+        
+        for (int i = 0; i < sections.length; i++) {
+            String section = sections[i].trim();
+            if (section.isEmpty()) continue;
 
-            String chunkText = fullText.substring(currentStartIndex, headingStartIndex).trim();
-            if (!chunkText.isEmpty()) {
-                log.debug("Adding initial chunk (Order {}) from index {} to {}. Title: null", chunkOrder, currentStartIndex, headingStartIndex);
-                initialChunks.add(DocumentChunk.builder()
-                        .text(chunkText)
-                        .originalOrder(chunkOrder++)
-                        .startIndex(currentStartIndex)
-                        .endIndex(headingStartIndex)
-                        .sectionTitle(null)
-                        .build());
+            // Extract section header and metadata
+            String header = extractSectionHeader(section);
+            String content = section.substring(header.length()).trim();
+            
+            // Identify clause type
+            String clauseType = identifyClauseType(content);
+            
+            // Split content into smaller chunks if needed
+            if (content.length() > LEGAL_CHUNK_SIZE) {
+                List<String> subChunks = splitIntoOverlappingChunks(content, LEGAL_CHUNK_SIZE);
+                for (String subChunk : subChunks) {
+                    chunks.add(new TextChunk(
+                        header + "\n" + subChunk,
+                        "legal",
+                        clauseType,
+                        i,
+                        extractKeyEntities(subChunk) // New: Extract key entities
+                    ));
+                }
             } else {
-                 log.debug("Skipping empty chunk between index {} and {}", currentStartIndex, headingStartIndex);
+                chunks.add(new TextChunk(
+                    section,
+                    "legal",
+                    clauseType,
+                    i,
+                    extractKeyEntities(content)
+                ));
             }
-            currentStartIndex = headingStartIndex; // Move start index to the beginning of the heading
         }
-        log.debug("Finished initial split based on headings. Current start index: {}", currentStartIndex);
+        return chunks;
+    }
 
-        // Add the last chunk
-        String lastChunkText = fullText.substring(currentStartIndex).trim();
-        if (!lastChunkText.isEmpty()) {
-             String sectionTitleForLastChunk = null;
-             Matcher lastChunkMatcher = HEADING_PATTERN.matcher(lastChunkText);
-             if (lastChunkMatcher.find() && lastChunkMatcher.start() == 0) {
-                 sectionTitleForLastChunk = lastChunkMatcher.group(0).trim();
-                 log.debug("Identified title for last chunk: '{}'", sectionTitleForLastChunk);
-             }
-             log.debug("Adding final initial chunk (Order {}) from index {} to {}. Title: '{}'", chunkOrder, currentStartIndex, fullText.length(), sectionTitleForLastChunk);
-            initialChunks.add(DocumentChunk.builder()
-                    .text(lastChunkText)
-                    .originalOrder(chunkOrder++)
-                    .startIndex(currentStartIndex)
-                    .endIndex(fullText.length())
-                    .sectionTitle(sectionTitleForLastChunk)
-                    .build());
+    /**
+     * Enhanced financial document splitting with table awareness
+     */
+    private List<TextChunk> splitFinancialDocument(String text) {
+        List<TextChunk> chunks = new ArrayList<>();
+        String[] sections = FINANCIAL_SECTION_PATTERN.split(text);
+        
+        for (int i = 0; i < sections.length; i++) {
+            String section = sections[i].trim();
+            if (section.isEmpty()) continue;
+
+            // Enhanced table detection
+            if (isTable(section)) {
+                chunks.add(new TextChunk(
+                    section,
+                    "financial",
+                    "table",
+                    i,
+                    extractTableMetadata(section)
+                ));
+            } else {
+                // Split long text sections with financial context
+                if (section.length() > FINANCIAL_CHUNK_SIZE) {
+                    List<String> subChunks = splitIntoOverlappingChunks(section, FINANCIAL_CHUNK_SIZE);
+                    for (String subChunk : subChunks) {
+                        chunks.add(new TextChunk(
+                            subChunk,
+                            "financial",
+                            identifyFinancialSectionType(subChunk),
+                            i,
+                            extractFinancialMetrics(subChunk)
+                        ));
+                    }
+                } else {
+                    chunks.add(new TextChunk(
+                        section,
+                        "financial",
+                        identifyFinancialSectionType(section),
+                        i,
+                        extractFinancialMetrics(section)
+                    ));
+                }
+            }
+        }
+        return chunks;
+    }
+
+    /**
+     * Enhanced medical document splitting with structured data extraction
+     */
+    private List<TextChunk> splitMedicalDocument(String text) {
+        List<TextChunk> chunks = new ArrayList<>();
+        String[] sections = MEDICAL_SECTION_PATTERN.split(text);
+        
+        for (int i = 0; i < sections.length; i++) {
+            String section = sections[i].trim();
+            if (section.isEmpty()) continue;
+
+            String sectionType = identifyMedicalSectionType(section);
+            List<String> keyFindings = extractMedicalFindings(section);
+            
+            if (section.length() > MEDICAL_CHUNK_SIZE) {
+                List<String> subChunks = splitIntoOverlappingChunks(section, MEDICAL_CHUNK_SIZE);
+                for (String subChunk : subChunks) {
+                    chunks.add(new TextChunk(
+                        subChunk,
+                        "medical",
+                        sectionType,
+                        i,
+                        keyFindings
+                    ));
+                }
+            } else {
+                chunks.add(new TextChunk(
+                    section,
+                    "medical",
+                    sectionType,
+                    i,
+                    keyFindings
+                ));
+            }
+        }
+        return chunks;
+    }
+
+    /**
+     * Generic document splitting for unknown document types
+     */
+    private List<TextChunk> splitGenericDocument(String text) {
+        List<TextChunk> chunks = new ArrayList<>();
+        String[] paragraphs = PARAGRAPH_PATTERN.split(text);
+        
+        for (int i = 0; i < paragraphs.length; i++) {
+            String paragraph = paragraphs[i].trim();
+            if (paragraph.isEmpty()) continue;
+
+            if (paragraph.length() > DEFAULT_CHUNK_SIZE) {
+                List<String> subChunks = splitIntoOverlappingChunks(paragraph, DEFAULT_CHUNK_SIZE);
+                for (String subChunk : subChunks) {
+                    chunks.add(new TextChunk(
+                        subChunk,
+                        "generic",
+                        "paragraph",
+                        i,
+                        extractKeyEntities(subChunk)
+                    ));
+                }
+            } else {
+                chunks.add(new TextChunk(
+                    paragraph,
+                    "generic",
+                    "paragraph",
+                    i,
+                    extractKeyEntities(paragraph)
+                ));
+            }
+        }
+        return chunks;
+    }
+
+    /**
+     * Splits text into overlapping chunks of specified size
+     */
+    private List<String> splitIntoOverlappingChunks(String text, int chunkSize) {
+        List<String> chunks = new ArrayList<>();
+        int start = 0;
+        
+        while (start < text.length()) {
+            int end = Math.min(start + chunkSize, text.length());
+            
+            // Try to find a natural break point
+            if (end < text.length()) {
+                // First try to break at sentence boundary
+                int lastSentence = findLastSentenceBoundary(text, start, end);
+                if (lastSentence > start) {
+                    end = lastSentence;
+                } else {
+                    // Fallback to word boundary
+                    int lastSpace = text.lastIndexOf(' ', end);
+                    if (lastSpace > start) {
+                        end = lastSpace;
+                    }
+                }
+            }
+            
+            chunks.add(text.substring(start, end).trim());
+            start = end - DEFAULT_CHUNK_OVERLAP;
+        }
+        
+        return chunks;
+    }
+
+    /**
+     * Extracts section header from text
+     */
+    private String extractSectionHeader(String text) {
+        int firstNewline = text.indexOf('\n');
+        if (firstNewline > 0) {
+            return text.substring(0, firstNewline).trim();
+        }
+        return "";
+    }
+
+    /**
+     * Identifies the type of medical section
+     */
+    private String identifyMedicalSectionType(String text) {
+        String lowerText = text.toLowerCase();
+        if (lowerText.contains("diagnosis") || lowerText.contains("dx")) {
+            return "diagnosis";
+        } else if (lowerText.contains("treatment") || lowerText.contains("rx")) {
+            return "treatment";
+        } else if (lowerText.contains("history") || lowerText.contains("hx")) {
+            return "history";
+        } else if (lowerText.contains("examination") || lowerText.contains("exam")) {
+            return "examination";
         } else {
-             log.debug("Skipping empty last chunk from index {}.", currentStartIndex);
+            return "other";
         }
-        log.info("Generated {} initial chunks based on headings.", initialChunks.size());
+    }
 
+    /**
+     * Enhanced TextChunk with additional metadata
+     */
+    public static class TextChunk {
+        private final String text;
+        private final String documentType;
+        private final String sectionType;
+        private final int order;
+        private final List<String> metadata; // New: Additional metadata
 
-        // 2. Apply fallback splitting to large chunks
-        log.debug("Applying fallback splitting for chunks larger than {} chars...", MAX_CHUNK_SIZE_CHARS);
-        List<DocumentChunk> finalChunks = new ArrayList<>();
-        int finalChunkOrder = 0;
-
-        for (DocumentChunk chunk : initialChunks) {
-             log.trace("Processing initial chunk order: {}", chunk.getOriginalOrder()); // Use TRACE
-            if (chunk.getText().length() > MAX_CHUNK_SIZE_CHARS) {
-                log.debug("Chunk (Initial Order {}) is large ({} chars), applying fallback splitting by paragraph.",
-                        chunk.getOriginalOrder(), chunk.getText().length());
-
-                String[] paragraphs = chunk.getText().split("\\n\\n+");
-                int currentRelativeIndex = 0; // Tracks position within the current large chunk's text
-                log.debug("Split large chunk into {} potential paragraphs.", paragraphs.length);
-
-                for (int i = 0; i < paragraphs.length; i++) { // Loop with index for logging
-                    String paragraph = paragraphs[i];
-                    String trimmedParagraph = paragraph.trim();
-                    int paragraphStartIndexInChunk = -1; // Initialize before the block
-
-                    if (!trimmedParagraph.isEmpty()) {
-                        // Find the start index of this paragraph within the original chunk's text
-                        paragraphStartIndexInChunk = chunk.getText().indexOf(paragraph, currentRelativeIndex);
-                        if (paragraphStartIndexInChunk == -1) {
-                             log.warn("Could not reliably find start index for paragraph {} in chunk {}. Skipping.", i, chunk.getOriginalOrder());
-                             // Update relative index cautiously to avoid infinite loops if indexOf fails repeatedly
-                             currentRelativeIndex += paragraph.length();
-                             continue; // Skip if index finding fails
-                        }
-                        int paragraphStartIndex = chunk.getStartIndex() + paragraphStartIndexInChunk;
-                        int paragraphEndIndex = paragraphStartIndex + paragraph.length(); // Use original paragraph length for index
-
-                        log.trace("Processing paragraph {} (StartIdx: {}, EndIdx: {})", i, paragraphStartIndex, paragraphEndIndex);
-
-                        if (trimmedParagraph.length() > MAX_CHUNK_SIZE_CHARS) {
-                            log.debug("Paragraph {} within chunk {} is still too large ({} chars), splitting by sentence.", i, chunk.getOriginalOrder(), trimmedParagraph.length());
-                            String[] sentences = trimmedParagraph.split("(?<=[.!?])\\s+"); // Basic sentence split
-                            int currentSentenceRelativeIndex = 0; // Tracks position within the current paragraph's text
-                             log.debug("Split paragraph into {} potential sentences.", sentences.length);
-
-                             for (int j = 0; j < sentences.length; j++) { // Loop with index for logging
-                                 String sentence = sentences[j];
-                                 String trimmedSentence = sentence.trim();
-                                 if (!trimmedSentence.isEmpty()) {
-                                     // Find start index of sentence within the paragraph
-                                     int sentenceStartIndexInPara = trimmedParagraph.indexOf(sentence, currentSentenceRelativeIndex);
-                                     if (sentenceStartIndexInPara == -1) {
-                                         log.warn("Could not reliably find start index for sentence {} in paragraph {}. Skipping.", j, i);
-                                         currentSentenceRelativeIndex += sentence.length(); // Update cautiously
-                                         continue; // Skip if index finding fails
-                                     }
-                                     int sentenceStartIndex = paragraphStartIndex + sentenceStartIndexInPara;
-                                     int sentenceEndIndex = sentenceStartIndex + sentence.length(); // Use original sentence length
-
-                                     log.trace("Adding sentence chunk (Final Order {}): StartIdx={}, EndIdx={}", finalChunkOrder, sentenceStartIndex, sentenceEndIndex);
-                                     finalChunks.add(DocumentChunk.builder()
-                                             .text(trimmedSentence)
-                                             .originalOrder(finalChunkOrder++)
-                                             .startIndex(sentenceStartIndex)
-                                             .endIndex(sentenceEndIndex)
-                                             .sectionTitle(chunk.getSectionTitle()) // Inherit parent section title
-                                             .build());
-                                     // Update relative index within the paragraph
-                                     currentSentenceRelativeIndex = sentenceStartIndexInPara + sentence.length();
-                                 } else {
-                                      log.trace("Skipping empty sentence chunk (Index {}).", j);
-                                 }
-                             }
-                        } else {
-                           // Paragraph is within size limit
-                            log.trace("Adding paragraph chunk (Final Order {}): StartIdx={}, EndIdx={}", finalChunkOrder, paragraphStartIndex, paragraphEndIndex);
-                           finalChunks.add(DocumentChunk.builder()
-                                   .text(trimmedParagraph)
-                                   .originalOrder(finalChunkOrder++)
-                                   .startIndex(paragraphStartIndex)
-                                   .endIndex(paragraphEndIndex)
-                                   .sectionTitle(chunk.getSectionTitle()) // Inherit parent section title
-                                   .build());
-                        }
-                    } else {
-                         log.trace("Skipping empty paragraph chunk (Index {}).", i);
-                    }
-
-                    // Update relative index within the original large chunk's text
-                    // Ensure paragraphStartIndexInChunk was found before using it
-                    if (paragraphStartIndexInChunk != -1) {
-                         currentRelativeIndex = paragraphStartIndexInChunk + paragraph.length();
-                    } else {
-                         // If index wasn't found, advance cautiously based on paragraph length
-                         // This might drift if indexOf keeps failing, but prevents getting stuck
-                         currentRelativeIndex += paragraph.length();
-                    }
-                } // End of paragraph loop
-            } else {
-                // Chunk is within size limit, add it directly with updated order
-                 log.trace("Adding original chunk (Initial Order {}) as final chunk (Final Order {}). Size: {}", chunk.getOriginalOrder(), finalChunkOrder, chunk.getText().length());
-                finalChunks.add(DocumentChunk.builder()
-                        .text(chunk.getText())
-                        .originalOrder(finalChunkOrder++) // Assign new order
-                        .startIndex(chunk.getStartIndex())
-                        .endIndex(chunk.getEndIndex())
-                        .sectionTitle(chunk.getSectionTitle())
-                        .build());
-            }
-        } // End of initialChunks loop
-
-        // 3. Final Clean up (remove any empty strings)
-        int countBeforeCleanup = finalChunks.size();
-        finalChunks.removeIf(c -> c.getText() == null || c.getText().trim().isEmpty());
-        int countAfterCleanup = finalChunks.size();
-        if (countBeforeCleanup != countAfterCleanup) {
-            log.debug("Removed {} empty chunks during final cleanup.", countBeforeCleanup - countAfterCleanup);
+        public TextChunk(String text, String documentType, String sectionType, int order, List<String> metadata) {
+            this.text = text;
+            this.documentType = documentType;
+            this.sectionType = sectionType;
+            this.order = order;
+            this.metadata = metadata;
         }
 
-
-        // --- >>> EXISTING FINAL LOGGING <<< ---
-        if (log.isDebugEnabled()) {
-            log.debug("--- Final Document Chunks Generated (Count: {}) ---", finalChunks.size());
-            for (DocumentChunk finalChunk : finalChunks) {
-                log.debug("Chunk Order: {}, Title: '{}', StartIdx: {}, EndIdx: {}, Text Snippet: '{}...'",
-                        finalChunk.getOriginalOrder(),
-                        finalChunk.getSectionTitle() != null ? finalChunk.getSectionTitle() : "N/A",
-                        finalChunk.getStartIndex(),
-                        finalChunk.getEndIndex(),
-                        truncateTextForLog(finalChunk.getText(), 100)
-                );
-            }
-            log.debug("--- End of Final Document Chunks ---");
+        public String getText() {
+            return text;
         }
-        // --- >>> END OF EXISTING FINAL LOGGING <<< ---
 
-        log.info("Split text into {} final chunks.", finalChunks.size());
-        return finalChunks;
+        public String getDocumentType() {
+            return documentType;
+        }
+
+        public String getSectionType() {
+            return sectionType;
+        }
+
+        public int getOrder() {
+            return order;
+        }
+
+        public List<String> getMetadata() {
+            return metadata;
+        }
     }
 
     // Helper method for truncating log output
@@ -231,4 +351,61 @@ public class TextSplitterService {
     }
 
     // TODO: Refine HEADING_REGEX based on backtesting results.
+
+    // New helper methods for enhanced chunking
+
+    private String identifyClauseType(String text) {
+        String lowerText = text.toLowerCase();
+        if (lowerText.contains("whereas")) return "recital";
+        if (lowerText.contains("now, therefore")) return "operative";
+        if (lowerText.contains("in witness whereof")) return "signature";
+        if (lowerText.contains("definitions")) return "definition";
+        return "general";
+    }
+
+    private boolean isTable(String text) {
+        return text.contains("|") || text.contains("\t") || 
+               text.matches(".*\\d+\\s*\\|\\s*\\d+.*"); // Matches number|number pattern
+    }
+
+    private List<String> extractTableMetadata(String table) {
+        List<String> metadata = new ArrayList<>();
+        // Extract column headers, row count, etc.
+        return metadata;
+    }
+
+    private String identifyFinancialSectionType(String text) {
+        String lowerText = text.toLowerCase();
+        if (lowerText.contains("revenue") || lowerText.contains("income")) return "revenue";
+        if (lowerText.contains("expense") || lowerText.contains("cost")) return "expense";
+        if (lowerText.contains("asset") || lowerText.contains("liability")) return "balance";
+        return "other";
+    }
+
+    private List<String> extractFinancialMetrics(String text) {
+        List<String> metrics = new ArrayList<>();
+        // Extract numbers, percentages, dates
+        return metrics;
+    }
+
+    private List<String> extractMedicalFindings(String text) {
+        List<String> findings = new ArrayList<>();
+        // Extract medical terms, measurements, observations
+        return findings;
+    }
+
+    private List<String> extractKeyEntities(String text) {
+        List<String> entities = new ArrayList<>();
+        // Extract named entities, dates, numbers
+        return entities;
+    }
+
+    private int findLastSentenceBoundary(String text, int start, int end) {
+        String substring = text.substring(start, end);
+        String[] sentences = SENTENCE_PATTERN.split(substring);
+        if (sentences.length > 1) {
+            return start + sentences[sentences.length - 2].length() + 1;
+        }
+        return -1;
+    }
 }

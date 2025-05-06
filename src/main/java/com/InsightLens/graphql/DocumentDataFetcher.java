@@ -7,12 +7,14 @@ import com.InsightLens.service.DocumentService;
 import com.netflix.graphql.dgs.DgsComponent;
 import com.netflix.graphql.dgs.DgsDataFetchingEnvironment;
 import com.netflix.graphql.dgs.DgsMutation;
+import com.netflix.graphql.dgs.DgsQuery;
 import com.netflix.graphql.dgs.InputArgument;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.util.List;
 
 /**
  * DGS Component responsible for handling GraphQL mutations and queries related to Documents.
@@ -24,6 +26,19 @@ public class DocumentDataFetcher {
 
     private final DocumentService documentService;
     private final ComparisonService comparisonService; // Inject ComparisonService
+
+    /**
+     * DGS Query implementation for getting documents by status.
+     * Corresponds to the 'documentsByStatus' field in the GraphQL Query type.
+     *
+     * @param status The status of the documents to retrieve.
+     * @return A list of documents with the specified status.
+     */
+    @DgsQuery(field = "documentsByStatus")
+    public List<Document> getDocumentsByStatus(@InputArgument String status) {
+        log.info("GraphQL query 'documentsByStatus' received with status: {}", status);
+        return documentService.getDocumentsByStatus(status);
+    }
 
     /**
      * DGS Mutation implementation for handling document uploads via GraphQL.
